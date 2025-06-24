@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SAHNET Latent Space Visualization</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #tooltip {
+      position: absolute;
+      padding: 6px 10px;
+      background: #003040;
+      color: white;
+      font-family: sans-serif;
+      font-size: 13px;
+      border-radius: 4px;
+      pointer-events: none;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div style="position: absolute; bottom: 10px; left: 20px; pointer-events: none; font-family: sans-serif; color: white; line-height: 30px; font-size: 12px;">
+    SAHNET Latent Space Visualization (May 2025)<br/>
+    <img src="logo.svg" width="250" />
+  </div>
+  <div style="
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    padding: 5px 10px;
+    font-size: 14px;
+    z-index: 10;">
+
+    <button id="btnspin">Toggle Spin</button>
+    <input id="searchBox" type="text" placeholder="Search by SCE-ID" width="120"/>
+  </div>
+
+   <div id="tooltip" style="display: none;">
+    <div id="bgname"></div>
+    <div style="width: 224px; height: 140px; position: relative; outline: 1px solid #00c0ff; margin-top: 8px; border: 2px solid #000; background: #000;">
+      <img style="position: absolute; top: 0; left: 0; object-fit: contain;" width="224" height="140" id="bgimg" onerror="this.src='data:image/gif;base64,R0lGODlhAQABAIAAAP\/\/\/wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=='"/>
+      <video loop muted autoplay style="position: absolute; top: 0; left: 0;" id="bgvid" width="224" height="140"></video>
+    </div>
+  </div>
+  <script type="importmap">
+  {
+      "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.176.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.176.0/examples/jsm/"
+      }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    let timeoutID = null;
+    let g_bgsrc = null;
+    let g_vidsrc = null;
+    
+    const keysPressed = {
+      w: false,
+      s: false,
+      
+      a: false,
+      d: false,
+      
+      q: false,
+      z: false,
+
+      control: false,
+      alt: false
+    };
+
+    window.addEventListener('blur', (event) => {
+      for (const k of Object.keys(keysPressed))
+      {
+        keysPressed[k] = false;
+      }
+      mouseDown = false;
+    });
+
+    window.addEventListener('mousedown', (event) => {
+      mouseDown = true;
+    });
+
+    window.addEventListener('mouseup', (event) => {
+      mouseDown = false;
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.target != document.getElementById('searchBox'))
+      {
+        event.preventDefault();
+        if (event.key.toLowerCase() in keysPressed) {
+          keysPressed[event.key.toLowerCase()] = true;
+        }
+      }
+    });
+
+    window.addEventListener('keyup', (event) => {
+      event.preventDefault();
+      if (event.key.toLowerCase() in keysPressed) {
+        keysPressed[event.key.toLowerCase()] = false;
+      }
+    });
+
+    const clock = new THREE.Clock();
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    //scene.fog = new THREE.Fog(0x000000, 5, 15);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.01, 1000);
+    camera.position.z = 7;
+
+    const renderer = new THREE.WebGLRenderer({alpha: false, antialias: true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.autoRotate = true;
+    controls.enableDamping = true;
+
+    const tooltip = document.getElementById('tooltip');
+    const tooltipname = document.getElementById('bgname');
+    const tooltipbg = document.getElementById('bgimg');
+    const tooltipvid = document.getElementById('bgvid');
+    const btnspin = document.getElementById('btnspin').addEventListener('click', (event)=>{
+      controls.autoRotate = !controls.autoRotate;
+    });
+
+    const raycasters = new Array();
+    {
+      const distanceFactor = 0.2;
+      const thresholdFactor = 0.001;
+      const maxIterations = 6;
+      for (let ix = 0; ix < maxIterations; ++ix)
+      {
+        const raycaster = new THREE.Raycaster();
+        raycaster.near = 0;
+        raycaster.far = 30;
+        if (ix) raycaster.near = distanceFactor * Math.exp(ix);
+        if (ix == maxIterations - 1) raycaster.far = distanceFactor * Math.exp(ix + 1);
+        raycaster.params.Points.threshold = thresholdFactor * Math.exp(ix);
+
+        raycasters.push(raycaster);
+      }
+    }
+
+    const mouse = new THREE.Vector2();
+    let pointsMesh = null;
+    let idList = [];
+    let nameList = [];
+    let hashList = [];
+
+    const uniforms = {
+      selectedIndex: { value: -1 },
+      minSize: { value: 1.5 },
+      hoverMinSize: { value: 5 },
+      baseSize: { value: 1 },
+      hoverSize: { value: 1.5 },
+      resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+    };
+
+    let mouseX = -20000;
+    let mouseY = -20000;
+    let mouseDown = false;
+
+    let cliX = 0;
+    let cliY = 0;
+
+    fetch('data.json')
+      .then(res => res.json())
+      .then(data => {
+        const positions = new Float32Array(data.length * 3);
+        const colors = new Float32Array(data.length * 3);
+        idList = data.map(d => d.id);
+        nameList = data.map(d => d.name);
+        hashList = data.map(d => d.hash);
+
+        data.forEach((point, i) => {
+          positions.set([point.x - 9.6, point.y - 16.2, point.z + 6.7], i * 3);
+          colors.set([point.r, point.g, point.b], i * 3);
+        });
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        function animateCameraTo(targetPos) {
+          const duration = 1000;
+
+          const startTarget = controls.target.clone();
+          const endTarget = targetPos.clone();
+
+          const startCam = camera.position.clone();
+
+
+          const viewDir = camera.position.clone().sub(startTarget).normalize();
+
+          const finalDistance = 0.075;
+
+          const endCam = endTarget.clone().add(viewDir.clone().multiplyScalar(finalDistance));
+
+          const startTime = performance.now();
+
+          function easeInOutCubic(t) {
+            return t < 0.5
+              ? 4 * t * t * t
+              : 1 - Math.pow(-2 * t + 2, 3) / 2;
+          }
+
+          function update() {
+            const elapsed = performance.now() - startTime;
+            const t = Math.max(0, Math.min(elapsed / duration, 1));
+            const easedT = easeInOutCubic(t);
+
+            controls.target.lerpVectors(startTarget, endTarget, easedT);
+            camera.position.lerpVectors(startCam, endCam, easedT);
+
+            controls.update();
+
+            if (t < 1) {
+              requestAnimationFrame(update);
+            }
+          }
+          requestAnimationFrame(update);
+        }
+
+        document.getElementById('searchBox').addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            const input = event.target.value.trim();
+            const index = idList.indexOf(input);
+
+            if (index !== -1) {
+              const x = positions[index * 3];
+              const y = positions[index * 3 + 1];
+              const z = positions[index * 3 + 2];
+
+              const target = new THREE.Vector3(x, y, z);
+              animateCameraTo(target);
+
+            } else {
+              alert('Background not found.');
+            }
+          }
+        });
+
+        window.addEventListener('dblclick', (event)=>{
+          if (!pointsMesh) return;
+
+          mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+          mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+          let index = -1;
+          for (const raycaster of raycasters)
+          {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(pointsMesh);
+            if (intersects.length > 0) {
+              index = intersects[0].index;
+              break;
+            }
+          }
+
+          if (index != -1) {
+            const id = idList[index];
+
+            if (keysPressed.alt)
+            {
+              window.open('https://www.steamcardexchange.net/index.php?backgroundviewer-' + id, '_blank');
+            }
+            else
+            {
+              const x = positions[index * 3];
+              const y = positions[index * 3 + 1];
+              const z = positions[index * 3 + 2];
+
+              const target = new THREE.Vector3(x, y, z);
+
+              animateCameraTo(target);
+            }
+          }
+        })
+
+        const vertexShader = `
+          varying vec3 vColor;
+          uniform float selectedIndex;
+          uniform float minSize;
+          uniform float hoverMinSize;
+          uniform float baseSize;
+          uniform float hoverSize;
+
+          void main() {
+            vColor = color;
+            float size = baseSize;
+            
+            vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            size = max(minSize, baseSize / pos.w);
+
+            if (float(gl_VertexID) == selectedIndex) {
+              size = max(hoverMinSize, hoverSize / pos.w);
+              vColor = vec3(1.0, 1.0, 1.0);
+            }
+            gl_PointSize = size;
+            gl_Position = pos;
+          }
+        `;
+
+        const fragmentShader = `
+          varying vec3 vColor;
+          void main() {
+            float dist = distance(gl_PointCoord, vec2(0.5));
+            if (dist > 0.5) discard; // round points
+            gl_FragColor = vec4(vColor, 1.0);
+          }
+        `;
+
+        const material = new THREE.ShaderMaterial({
+          vertexShader,
+          fragmentShader,
+          vertexColors: true,
+          uniforms,
+          transparent: true
+        });
+
+        pointsMesh = new THREE.Points(geometry, material);
+        scene.add(pointsMesh);
+
+        animate(0);
+      });
+
+    function animate() {
+
+      const dt = Math.max(0, Math.min(clock.getDelta(), 0.25));
+      
+      controls.autoRotateSpeed = 38 * dt;
+
+      let index = -1;
+      if (mouseDown == false)
+      {
+        for (const raycaster of raycasters)
+        {
+          raycaster.setFromCamera({x: mouseX, y: mouseY}, camera);
+          const intersects = raycaster.intersectObject(pointsMesh);
+          if (intersects.length > 0) {
+            index = intersects[0].index;
+            break;
+          }
+        }
+      }
+
+      if (index != -1) {
+        const id = nameList[index];
+        const bg = hashList[index];
+        uniforms.selectedIndex.value = index;
+
+        tooltip.style.left = `${cliX + 10}px`;
+        tooltip.style.top = `${cliY + 10}px`;
+        tooltipname.innerText = id;
+
+        const bgsrc = `https://steamcommunity.com/economy/profilebackground/items/${bg}?size=224x224`;
+        const vidsrc = `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/items/${bg}`;
+
+        if (g_bgsrc != bgsrc && g_vidsrc != vidsrc)
+        {
+          tooltipbg.style.display = 'none';
+          tooltipvid.style.display = 'none';
+          g_bgsrc = bgsrc;
+          g_vidsrc = vidsrc;
+          clearTimeout(timeoutID)
+          timeoutID = setTimeout(()=>{
+            {
+              tooltipbg.onerror = ()=>
+              {
+                tooltipvid.onloadeddata = ()=>
+                {
+                  tooltipvid.style.display = 'block';
+                }
+                tooltipvid.src = vidsrc;
+              }
+              tooltipbg.onload = ()=>
+              {
+                tooltipbg.style.display = 'block';
+              }
+              tooltipbg.src = bgsrc;
+            }
+          }, 500);
+        }
+
+        tooltip.style.display = 'block';
+      } else {
+        uniforms.selectedIndex.value = -1.0;
+        tooltip.style.display = 'none';
+      }
+
+      const distance = camera.position.distanceTo(controls.target);
+      const speed = (keysPressed.control ? 5 : 1) * distance * dt;
+
+      // Direction vectors
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+
+      const right = new THREE.Vector3();
+      right.crossVectors(forward, camera.up).normalize();
+
+      const up = camera.up.normalize();
+
+      if (keysPressed.w) {
+        camera.position.addScaledVector(forward, speed);
+        controls.target.addScaledVector(forward, speed);
+      }
+      if (keysPressed.s) {
+        camera.position.addScaledVector(forward, -speed);
+        controls.target.addScaledVector(forward, -speed);
+      }
+      if (keysPressed.a) {
+        camera.position.addScaledVector(right, -speed);
+        controls.target.addScaledVector(right, -speed);
+      }
+      if (keysPressed.d) {
+        camera.position.addScaledVector(right, speed);
+        controls.target.addScaledVector(right, speed);
+      }
+      if (keysPressed.q) {
+        camera.position.addScaledVector(up, speed);
+        controls.target.addScaledVector(up, speed);
+      }
+      if (keysPressed.z) {
+        camera.position.addScaledVector(up, -speed);
+        controls.target.addScaledVector(up, -speed);
+      }
+
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    // Mousemove interaction
+    window.addEventListener('mousemove', (event) => {
+      if (!pointsMesh) return;
+
+      mouseX = (event.clientX / window.innerWidth) * 2 - 1;
+      mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
+
+      cliX = event.clientX;
+      cliY = event.clientY;
+    });
+
+    window.addEventListener('resize', () => {
+      uniforms.resolution.value.set(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
