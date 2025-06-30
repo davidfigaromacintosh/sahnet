@@ -112,7 +112,8 @@
     //scene.fog = new THREE.Fog(0x000000, 5, 15);
 
     const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.01, 1000);
-    camera.position.z = 7;
+    camera.position.z = 5;
+    camera.position.y = 5;
 
     const renderer = new THREE.WebGLRenderer({alpha: false, antialias: true});
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -180,7 +181,7 @@
         hashList = data.map(d => d.hash);
 
         data.forEach((point, i) => {
-          positions.set([point.x - 9.6, point.y - 16.2, point.z + 6.7], i * 3);
+          positions.set([point.x - 8.7, point.y - 26.5, point.z - 25.7], i * 3);
           colors.set([point.r, point.g, point.b], i * 3);
         });
 
